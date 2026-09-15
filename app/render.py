@@ -21,6 +21,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 ECC = {"L": ERROR_CORRECT_L, "M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q, "H": ERROR_CORRECT_H}
 MIN_BOX = 4                      # минимум пикселей на модуль QR для съёмки с улицы
+MIN_TEXT_STRIP = 12              # абсолютный минимум полосы: ниже не влезает и одна строка
+COMFORT_TEXT_STRIP = 24          # ниже этого в полосе помещается только одна строка
 
 C_PLATE = (255, 220, 0)          # номер — жёлтый
 C_TIME = (255, 255, 255)         # время — белый
@@ -92,7 +94,55 @@ def render_card(*, qr_data: str | None = None, qr_image: bytes | None = None,
 
     has_text = bool(plate.strip() or time_.strip() or amount.strip() or dur.strip())
     pos = pos if has_text else "none"
-    text_strip = round(height * 0.20) if pos in ("top", "bottom") else 0
+
+    # Раскладка подстраивается под ДЛИНУ ссылки, а не задаётся раз и навсегда.
+    #
+    # Полоса текста забирает 20 % высоты, и на коротких ссылках это ничего не
+    # стоит: 23 символа дают модуль 5 px при подписях. Но чем длиннее ссылка,
+    # тем больше модулей в QR, и в какой-то момент модуль падает ниже 4 px —
+    # с улицы камера телефона такой код уже не разделит. Отдать в этом случае
+    # весь экран под QR выгоднее, чем показать номер и сумму: номер водитель
+    # и так знает, а нечитаемый QR делает карточку бесполезной целиком.
+    #
+    # Порог по количеству символов здесь сознательно НЕ используется: он
+    # зависит от уровня коррекции и набора символов (цифры пакуются плотнее
+    # букв), и любое «до N символов» врёт в обе стороны. Считается реальная
+    # геометрия того QR, который будет нарисован.
+    layout_auto = None
+    default_strip = round(height * 0.20) if pos in ("top", "bottom") else 0
+
+    # Полоса текста подстраивается под ДЛИНУ ссылки, но не исчезает.
+    #
+    # Чем длиннее ссылка, тем больше модулей в QR, и при штатных 20 % высоты
+    # под подписи модуль в какой-то момент падает ниже 4 px — с улицы камера
+    # телефона такой код уже не разделит. Раньше в этом месте подписи
+    # снимались целиком; это чинило QR, но отнимало у водителя сумму, ради
+    # которой он на табло и смотрит.
+    #
+    # Поэтому полоса не убирается, а сжимается ровно настолько, чтобы модуль
+    # дотянул до 4 px: QR забирает то, что ему необходимо, текст оставляет
+    # себе остаток. Экономия обычно копеечная — 33 модулям нужно 132 px из
+    # 160, то есть полосе остаётся 28 px вместо 32.
+    #
+    # Порог по числу символов здесь сознательно НЕ используется: он зависит
+    # от уровня коррекции и набора символов (цифры пакуются плотнее букв) и
+    # врёт в обе стороны. Считается геометрия того QR, который будет
+    # нарисован.
+    if qr_data and default_strip:
+        modules = len(qr_matrix(qr_data, ecc)[0])
+        box_default = max(1, int(min(width, height - default_strip) * qr_pct / 100)) // modules
+        if box_default < MIN_BOX:
+            # Сколько высоты нужно самому QR, чтобы модуль стал читаемым.
+            needed = modules * MIN_BOX
+            candidate = height - needed
+            if candidate >= MIN_TEXT_STRIP:
+                layout_auto = (default_strip, candidate, box_default, MIN_BOX)
+                default_strip = candidate
+            # Иначе оставляем как есть: если даже пустой экран не даёт 4 px
+            # (длинный платёжный payload), отнимать у водителя сумму незачем -
+            # QR всё равно не прочитается, и об этом будет warning ниже.
+
+    text_strip = default_strip
     avail = min(width, height - text_strip)
     target = max(1, int(avail * qr_pct / 100))
 
@@ -101,6 +151,13 @@ def render_card(*, qr_data: str | None = None, qr_image: bytes | None = None,
     band_y = text_strip if pos == "top" else 0
     light = (white, white, white)
     info: dict = {"width": width, "height": height, "text_strip": text_strip}
+    if layout_auto:
+        was_strip, now_strip, was_box, now_box = layout_auto
+        info["layout"] = "text_compact"
+        info["layout_reason"] = (
+            f"полоса текста сжата с {was_strip} до {now_strip} px ради читаемости QR: "
+            f"модуль был бы {was_box} px (< {MIN_BOX} px), стал {now_box} px"
+        )
 
     # светлая зона QR — на всю ширину: иначе модули упираются в чёрный фон и сканер
     # теряет границу кода
@@ -142,11 +199,22 @@ def render_card(*, qr_data: str | None = None, qr_image: bytes | None = None,
         top = 0 if pos == "top" else height - text_strip
         d.rectangle([0, top, width - 1, top + text_strip - 1], fill=(0, 0, 0))
         rows = []
-        if plate.strip():
-            rows.append([(plate, C_PLATE)])
-        second = [(t, c) for t, c in ((time_, C_TIME), (dur, C_DUR), (amount, C_AMOUNT)) if t.strip()]
-        if second:
-            rows.append(second)
+        if text_strip < COMFORT_TEXT_STRIP:
+            # Полоса сжата ради читаемости QR, и делить её на две строки
+            # нельзя: по 6 px на строку номер превращается в кашу - проверено
+            # на отрисовке. Остаётся одна строка во всю высоту полосы, и в
+            # ней сумма: за ней водитель на табло и смотрит, номер своей
+            # машины он знает и без экрана.
+            main = amount.strip() or plate.strip() or dur.strip() or time_.strip()
+            if main:
+                color = C_AMOUNT if amount.strip() else C_PLATE
+                rows.append([(main, color)])
+        else:
+            if plate.strip():
+                rows.append([(plate, C_PLATE)])
+            second = [(t, c) for t, c in ((time_, C_TIME), (dur, C_DUR), (amount, C_AMOUNT)) if t.strip()]
+            if second:
+                rows.append(second)
         if rows:
             lh = text_strip // len(rows)
             tpad, gap = 2, 2
