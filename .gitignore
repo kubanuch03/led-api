@@ -33,3 +33,6 @@ preview_*.png
 
 # --- Логи ---
 *.log
+
+# Локальное переопределение сети
+docker-compose.override.yml
