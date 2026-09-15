@@ -1,0 +1,35 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- Настройки окружения ---
+# .env держит адрес панели и API_TOKEN — в репозиторий не кладём.
+# Шаблон .env.example, наоборот, версионируем: он показывает состав переменных.
+.env
+.env.*
+!.env.example
+
+# --- Артефакты работы сервиса ---
+# Карточки и превью, которые рисует /card и /preview: генерируются на лету.
+card_rgba.png
+sent_last.png
+blank_py.png
+upload.png
+preview_*.png
+
+# --- Редакторы и ОС ---
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# --- Логи ---
+*.log
