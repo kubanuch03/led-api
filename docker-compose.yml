@@ -1,0 +1,20 @@
+services:
+  led_api:
+    build: .
+    container_name: led_api
+    restart: unless-stopped
+    ports:
+      - "8840:8000"
+    environment:
+      # Адрес LED-панели в сети парковки (раньше была на link-local 169.254.255.254).
+      HD_HOST: "${HD_HOST:-10.30.205.20}"
+      HD_DEVICE_ID: "${HD_DEVICE_ID:-C16L-B25-07457}"
+      HD_WIDTH: "${HD_WIDTH:-160}"
+      HD_HEIGHT: "${HD_HEIGHT:-160}"
+      # Панель выводит кадр повёрнутым на 180° — сервис поворачивает перед отправкой.
+      HD_ROT180: "${HD_ROT180:-1}"
+      # 255 на солнце, 170-200 в тени и ночью.
+      HD_WHITE: "${HD_WHITE:-255}"
+      HD_TZ_OFFSET: "${HD_TZ_OFFSET:-6}"
+      # Пусто — сервис открыт. Задайте токен, если он смотрит наружу.
+      API_TOKEN: "${API_TOKEN:-}"
