@@ -25,6 +25,25 @@ from dataclasses import dataclass, field
 
 PORT = 9527
 CHUNK = 9212                      # размер куска файла в кадре 0x0019
+
+#: Имена файлов кадров. Их РОВНО ДВА и они чередуются.
+#:
+#: Раньше кадр писался под именем `<md5>.png`, то есть каждый показ создавал
+#: файл с новым именем. На карте их накопилось 22 за два дня работы, а команды
+#: удаления в протоколе нет - строить уборку не на чем. Два слота дают жёсткую
+#: верхнюю границу без единой новой команды: расти нечему.
+#:
+#: Чередование, а не одно постоянное имя: запись в то же имя, что показывается
+#: сейчас, - это перезапись файла, который панель держит открытым, и она
+#: вправе показать старое содержимое из кеша. Следующий кадр всегда уходит в
+#: слот, который сейчас не на экране.
+SLOTS = ("slot_a.png", "slot_b.png")
+
+#: Сколько раз спрашивать панель, показала ли она кадр, и повторять команду
+#: показа между попытками. Три обращения с паузой укладываются примерно в
+#: десять секунд.
+APPLY_ATTEMPTS = 3
+APPLY_WAIT = 3.0
 DEFAULT_TIMEOUT = 5.0
 
 _XML = """<?xml version="1.0" encoding="UTF-8"?>
@@ -110,8 +129,8 @@ _XML = """<?xml version="1.0" encoding="UTF-8"?>
 <Attribute Name="__GUID__">{__GP__}</Attribute>
 <Attribute Name="__NAME__">parking</Attribute>
 <List Name="__FileList__" Index="0">
-<ListItem MD5="__MD5__" FileKey="Photo" FileName="__MD5__.png"/>
-<ListItem MD5="__MD5__" FileKey="PhotoSource" FileName="__MD5__.png"/>
+<ListItem MD5="__MD5__" FileKey="Photo" FileName="__FILE__"/>
+<ListItem MD5="__MD5__" FileKey="PhotoSource" FileName="__FILE__"/>
 </List>
 </Node>
 </Node>
@@ -318,6 +337,9 @@ class Panel:
         self._lock = threading.Lock()
         self.last_sent: bytes | None = None
         self.last_md5: str | None = None
+        # Начинаем со второго слота, чтобы первый же кадр после старта сервиса
+        # ушёл в slot_a: так имя первого файла предсказуемо при разборе.
+        self._slot_index = len(SLOTS) - 1
 
     # --- низкий уровень ---------------------------------------------------
 
@@ -389,9 +411,81 @@ class Panel:
                 return [m.decode() for m in re.findall(rb"[0-9a-f]{32}", body)]
         return []
 
+    def active_program_md5(self) -> str | None:
+        """
+        Хеш кадра, который панель показывает ПРЯМО СЕЙЧАС (0x0013 -> 0x0014).
+
+        Единственная честная проверка показа, какая есть в протоколе. До неё
+        успехом считалось «наш md5 есть в списке файлов карты» (0x0012) - и
+        эта проверка не могла увидеть залипание В ПРИНЦИПЕ: файл ложится на
+        карту всегда, показывается он или нет. Хуже того, она активно
+        маскировала неисправность - сервис рапортовал «карточка показана» на
+        физически чёрный экран, и так продолжалось двое суток.
+
+        Поэтому не «упрощать» обратно к проверке по списку файлов: список
+        отвечает на вопрос «записалось ли», а нужен ответ на «видит ли это
+        водитель». Это разные вопросы, и цена ошибки между ними - выезд на
+        объект.
+
+        Ответ 0x0014 несёт восемь служебных байт перед хешем. Их назначение
+        неизвестно (документации Huidu нет, всё снято с живого устройства) и
+        разбирать их незачем: для сравнения достаточно самого хеша.
+
+        Порядок кадров важен: 0x0014 приходит только после двойного 0x0011 -
+        одиночный 0x0013 после рукопожатия ответа не даёт. Установлено
+        замером, объяснения нет.
+        """
+        with self._lock:
+            with socket.create_connection((self.host, PORT), timeout=self.timeout) as sock:
+                sock.settimeout(self.timeout)
+                answers = self._session(
+                    sock,
+                    self._handshake()[:-1] + [_frame(0x0011), _frame(0x0011), _frame(0x0013)],
+                )
+        for rc, body in answers:
+            if rc == 0x0014:
+                found = re.findall(rb"[0-9a-f]{32}", body)
+                return found[0].decode() if found else None
+        return None
+
+    def _next_slot(self) -> str:
+        """
+        Слот для следующего кадра - всегда не тот, что писали в прошлый раз.
+
+        Состояние живёт в процессе сервиса. При его перезапуске отсчёт
+        начинается заново, и первый кадр может уйти в слот, который сейчас на
+        экране; на практике это одна перезапись после рестарта, а не рост
+        карты, ради которого слоты и заведены.
+        """
+        self._slot_index = (self._slot_index + 1) % len(SLOTS)
+        return SLOTS[self._slot_index]
+
+    def _apply_program(self) -> None:
+        """Сказать панели показать записанную программу (0x001D, 0x001F)."""
+        with self._lock:
+            with socket.create_connection((self.host, PORT), timeout=self.timeout) as sock:
+                sock.settimeout(self.timeout)
+                self._session(sock, self._handshake()[:-1] + [_frame(0x001D), _frame(0x001F)])
+
     def send_png(self, img: bytes, width: int | None = None, height: int | None = None,
                  verify: bool = True) -> SendResult:
-        """Показать PNG на весь экран и убедиться, что карта его действительно записала."""
+        """
+        Показать PNG на весь экран и убедиться, что панель его ПОКАЗЫВАЕТ.
+
+        Различие между «записан» и «показан» здесь принципиальное: панель
+        принимает файлы исправно даже когда перестала применять программы, и
+        по факту записи о показе судить нельзя.
+
+        Повторяется ПРИМЕНЕНИЕ, а не запись. Прежняя версия при неудаче слала
+        файл заново - лечила не ту стадию: запись проходила всегда, отказывало
+        применение, и каждый такой повтор лишь добавлял на карту ещё один
+        файл. Здесь файл пишется один раз, а при несовпадении повторяется
+        только команда показа.
+
+        Ответы 0x001E/0x0020 на применение приходят пустыми и успех от отказа
+        не отличают - сигналом они не являются. Достоверен только обратный
+        вопрос панели: что у тебя сейчас на экране.
+        """
         if self.rot180:
             try:
                 img = png_rot180(img)
@@ -401,19 +495,22 @@ class Panel:
         md5 = hashlib.md5(img).hexdigest()
         w, h = png_size(img)
         w, h = int(width or w), int(height or h)
+        slot = self._next_slot()
+
         xml = (_XML.replace("__H__", str(h)).replace("__W__", str(w))
                    .replace("__DEVID__", self.device_id)
                    .replace("__GS__", str(uuid.uuid4()))
                    .replace("__GF__", str(uuid.uuid4()))
                    .replace("__GP__", str(uuid.uuid4()))
-                   .replace("__MD5__", md5))
+                   .replace("__MD5__", md5)
+                   .replace("__FILE__", slot))
         xml_bytes = xml.replace("\n", "\r\n").encode("utf-8")
         boot = hashlib.md5(xml_bytes).hexdigest()
 
         frames = self._handshake()[:-1] + [
             _frame(0x0011), _frame(0x0011), _frame(0x0013),
             _frame(0x0015, bytes(4)),
-            *_file_frames(md5 + ".png", img),
+            *_file_frames(slot, img),
             *_file_frames(boot + ".boo", xml_bytes),
             _frame(0x001D), _frame(0x001F),
         ]
@@ -429,19 +526,38 @@ class Panel:
 
         self.last_sent, self.last_md5 = img, md5
         if not verify:
-            return SendResult(True, False, md5, detail="отправлено без проверки")
+            return SendResult(True, False, md5, detail=f"кадр записан в {slot}, показ не проверялся")
 
-        # ack значит «кадр получен», а не «файл записан» — проверяем список файлов.
-        time.sleep(1)
-        try:
-            files = self.files_on_panel()
-        except OSError as e:
-            return SendResult(True, False, md5, detail=f"отправлено, проверка не удалась: {e}")
-        if md5 in files:
-            return SendResult(True, True, md5, files, "картинка лежит на карте")
-        return SendResult(False, False, md5, files,
-                          "карта подтвердила кадры, но файл не записала — "
-                          "перезагрузите панель по питанию и повторите")
+        # Панель переключается не мгновенно, поэтому первое чтение - после
+        # паузы. Пауза и число попыток подобраны на живом устройстве: три
+        # обращения укладываются примерно в 10 секунд, дольше держать
+        # вызывающего незачем - карточка не стоит задержки платёжного пути.
+        for attempt in range(1, APPLY_ATTEMPTS + 1):
+            time.sleep(APPLY_WAIT)
+            try:
+                active = self.active_program_md5()
+            except OSError as e:
+                return SendResult(True, False, md5, detail=f"кадр записан в {slot}, проверка показа не удалась: {e}")
+
+            if active == md5:
+                return SendResult(True, True, md5, detail=f"показывается (слот {slot})")
+
+            if attempt < APPLY_ATTEMPTS:
+                # Файл НЕ переписываем - он на карте и целый. Повторяем
+                # только команду показа.
+                try:
+                    self._apply_program()
+                except OSError as e:
+                    return SendResult(True, False, md5, detail=f"кадр записан в {slot}, применение не прошло: {e}")
+
+        return SendResult(
+            False, False, md5,
+            detail=(
+                f"кадр записан в {slot}, но панель показывает другую программу "
+                f"({(active or 'неизвестно')[:8]}…). Панель не применяет новые программы - "
+                f"помогает только перезагрузка по питанию."
+            ),
+        )
 
     def blank(self, width: int = 160, height: int = 160) -> SendResult:
         """Погасить экран: сплошной чёрный кадр."""

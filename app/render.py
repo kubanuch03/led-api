@@ -239,3 +239,72 @@ def render_card(*, qr_data: str | None = None, qr_image: bytes | None = None,
     out = io.BytesIO()
     img.save(out, format="PNG")
     return out.getvalue(), info
+
+
+#: Цвет кадра простоя. Не белый: панель светит в лицо водителю на выезде, и
+#: залитый белым экран 160x160 ночью слепит.
+C_IDLE = (0, 200, 255)
+
+
+def render_idle(*, text: str = "", width: int = 160, height: int = 160) -> tuple[bytes, dict]:
+    """
+    Кадр простоя: что висит на табло, когда машины у шлагбаума нет.
+
+    ЧЁРНЫЙ ЭКРАН ЗАПРЕЩЁН КАК СОСТОЯНИЕ. Погашенная панель неотличима от
+    сгоревшей, от обрыва питания и от зависшего сервиса - ни водитель, ни
+    оператор, ни монтажник по ней не скажут, что происходит. Поэтому в простое
+    на экране всегда что-то светится, даже если сказать нечего.
+
+    Текст разбивается по словам и растягивается на всю доступную площадь: на
+    160x160 помещаются две-три коротких строки, и подбирать кегль руками под
+    каждый объект не нужно.
+    """
+    text = (text or "").strip() or "ПАРКОВКА"
+
+    img = Image.new("RGB", (width, height), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+
+    # Раскладываем слова по строкам так, чтобы самая длинная строка была как
+    # можно короче: три слова в одну строку на узкой панели дают нечитаемый
+    # кегль, а по одному слову в строке - слишком мелкие буквы по высоте.
+    words = text.split()
+    lines: list[str] = []
+    if len(words) <= 1:
+        lines = [text]
+    else:
+        best = None
+        for split in range(1, min(len(words), 3) + 1):
+            chunks, per = [], (len(words) + split - 1) // split
+            for i in range(0, len(words), per):
+                chunks.append(" ".join(words[i:i + per]))
+            longest = max(len(c) for c in chunks)
+            # Чем меньше самая длинная строка, тем крупнее влезет шрифт.
+            if best is None or longest < best[0]:
+                best = (longest, chunks)
+        lines = best[1]
+
+    pad = 6
+    line_h = (height - 2 * pad) // len(lines)
+
+    # Кегль ОДИН на все строки, подобранный по самой требовательной. Иначе
+    # короткое слово раздувается во весь экран, а длинное рядом остаётся
+    # мелким - надпись выглядит случайной, а не вывеской объекта.
+    font = min(
+        (_fit_font(d, line, width - 2 * pad, line_h) for line in lines),
+        key=lambda f: getattr(f, "size", 0),
+    )
+
+    for i, line in enumerate(lines):
+        box = d.textbbox((0, 0), line, font=font)
+        x = (width - (box[2] - box[0])) // 2 - box[0]
+        y = pad + i * line_h + (line_h - (box[3] - box[1])) // 2 - box[1]
+        d.text((x, y), line, fill=C_IDLE, font=font)
+
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue(), {
+        "width": width,
+        "height": height,
+        "kind": "idle",
+        "lines": lines,
+    }
