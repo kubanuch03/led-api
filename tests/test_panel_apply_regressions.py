@@ -4,14 +4,21 @@
 Правило: дефект, стоивший инцидента, закрывается тестом, а не только
 исправлением — иначе следующий человек «упростит» проверку обратно.
 
-REG-18 (LED-06): проверка показа сравнивает md5 отправленного кадра с
-    АКТИВНОЙ программой (0x0013→0x0014), а не ищет его в списке ВСЕХ файлов
-    карты. Файл ложится на карту всегда; поиск в списке отвечал «показано»
-    на что угодно, включая чёрный экран.
+REG-18 и REG-19 (LED-06, LED-07) ОТМЕНЕНЫ замером 21.09.2026 и заменены на
+    REG-21. Они требовали проверять показ кадром 0x0013→0x0014 и повторять
+    ПРИМЕНЕНИЕ при несовпадении. На панелях объекта 0x0014 не отвечает вовсе —
+    проверено на обеих (10.30.205.75 и .76) двумя независимыми клиентами, —
+    поэтому проверка не сходилась никогда: каждый показ объявлялся неудачей и
+    тянул за собой ещё два применения. Три переключения программы на одну
+    карточку — это и есть непрерывно моргающее табло, которое заметил
+    заказчик. Требование «файл пишется ОДИН раз» из REG-19 верное и сохранено
+    в REG-21.
 
-REG-19 (LED-07): при несовпадении повторяется ПРИМЕНЕНИЕ, а файл пишется
-    ОДИН раз. Прежний повтор перезаписывал файл — лечил не ту стадию
-    (запись проходила, отказывало применение).
+REG-21 (LED-09): показ проверяется СОСТАВОМ АКТИВНОЙ ПРОГРАММЫ
+    (0x0011→0x0012), одним опросом и без повторного применения. Что 0x0012
+    отдаёт именно активную программу, а не «все файлы карты», видно по
+    количеству: после нескольких сотен показанных карточек в ответе
+    по-прежнему две записи — кадр и boot-файл.
 
 REG-20 (LED-08): имена файлов кадра и программы ОБЯЗАНЫ быть уникальными.
     Попытка ограничить рост карты двумя фиксированными слотами выглядела
@@ -69,32 +76,33 @@ def _tiny_png() -> bytes:
     )
 
 
-def test_reg18_verify_uses_active_program_not_file_list(panel, monkeypatch):
+def test_reg21_verify_reads_active_program_contents(panel, monkeypatch):
     """
-    Панель ПРИНЯЛА файл (он есть в списке файлов), но активной осталась
-    другая программа. Прежняя проверка «md5 в списке файлов» вернула бы
-    успех; правильная — провал, потому что на экране не наш кадр.
+    Показано ⇔ наш md5 попал в СОСТАВ АКТИВНОЙ ПРОГРАММЫ (0x0011 -> 0x0012).
+
+    Панель приняла кадр и подтвердила все кадры ack'ами, но программу не
+    переключила - в активной осталась чужая. Это и есть «проглотила карточку»:
+    водитель по-прежнему видит счёт предыдущей машины.
     """
-    frames_sent = []
-    monkeypatch.setattr(panel, "_session", lambda sock, frames: frames_sent.append(frames) or [])
-    # Активная программа — ЧУЖАЯ, и не меняется сколько ни применяй.
-    monkeypatch.setattr(panel, "active_program_md5", lambda: "ffffffffffffffffffffffffffffffff")
+    monkeypatch.setattr(panel, "_session", lambda sock, frames: [])
+    # В активной программе - ЧУЖИЕ файлы.
+    monkeypatch.setattr(panel, "files_on_panel", lambda: ["f" * 32, "e" * 32])
 
     res = panel.send_png(_tiny_png())
 
     assert res.ok is False
     assert res.verified is False
-    assert "показывает другую" in res.detail
+    assert "проглотила карточку" in res.detail
 
 
-def test_reg18_verify_true_only_when_active_matches(panel, monkeypatch):
-    """Обратная сторона: показано ⇔ активная программа совпала с нашим md5."""
+def test_reg21_verify_true_when_our_frame_is_in_active_program(panel, monkeypatch):
+    """Обратная сторона: показано ⇔ наш md5 есть в активной программе."""
     import hashlib
 
     img = _tiny_png()
     want = hashlib.md5(img).hexdigest()  # rot180=False, значит шлём как есть
     monkeypatch.setattr(panel, "_session", lambda sock, frames: [])
-    monkeypatch.setattr(panel, "active_program_md5", lambda: want)
+    monkeypatch.setattr(panel, "files_on_panel", lambda: [want, "b" * 32])
 
     res = panel.send_png(img)
 
@@ -102,25 +110,36 @@ def test_reg18_verify_true_only_when_active_matches(panel, monkeypatch):
     assert res.verified is True
 
 
-def test_reg19_retries_apply_not_write(panel, monkeypatch):
+def test_reg21_failed_apply_is_not_retried(panel, monkeypatch):
     """
-    Применение не срабатывает → файл пишется ОДИН раз, а команда показа
-    повторяется. Раньше повтор слал файл заново и растил карту.
-    """
-    writes = {"n": 0}
-    applies = {"n": 0}
+    Применение не сработало → команда показа НЕ повторяется.
 
-    # send_png шлёт файл ровно одной сессией (первый _session-вызов).
-    monkeypatch.setattr(panel, "_session", lambda sock, frames: writes.__setitem__("n", writes["n"] + 1) or [])
+    Повтор здесь был прямым вредом. Проверка опиралась на кадр 0x0014, который
+    на панелях объекта не отвечает вовсе, поэтому не сходилась никогда - и
+    после каждого несовпадения слалась ещё одна команда применения. На живом
+    потоке это давало три переключения программы на одну карточку, то есть
+    непрерывно моргающее табло.
+
+    Файл при этом по-прежнему пишется ровно один раз: перезапись растила бы
+    карту, для которой нет команды очистки.
+    """
+    applies = {"n": 0}
+    file_frames = []
+
+    def _spy_session(sock, frames):
+        if any(_sent_file_names([fr]) for fr in frames):
+            file_frames.append(frames)
+        return []
+
+    monkeypatch.setattr(panel, "_session", _spy_session)
     monkeypatch.setattr(panel, "_apply_program", lambda: applies.__setitem__("n", applies["n"] + 1))
-    # Активная программа НИКОГДА не совпадает — худший случай, все попытки.
-    monkeypatch.setattr(panel, "active_program_md5", lambda: "0" * 32)
+    monkeypatch.setattr(panel, "files_on_panel", lambda: ["0" * 32])
 
     res = panel.send_png(_tiny_png())
 
     assert res.ok is False
-    assert writes["n"] == 1, "файл должен писаться один раз, а не на каждую попытку"
-    assert applies["n"] == pm.APPLY_ATTEMPTS - 1, "повторяется применение между попытками"
+    assert applies["n"] == 0, "повторное применение моргает табло и запрещено"
+    assert len(file_frames) == 1, "файл пишется один раз, а не на каждую попытку"
 
 
 def _sent_file_names(frames) -> list:
