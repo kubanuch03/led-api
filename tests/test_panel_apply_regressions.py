@@ -110,18 +110,24 @@ def test_reg21_verify_true_when_our_frame_is_in_active_program(panel, monkeypatc
     assert res.verified is True
 
 
-def test_reg21_failed_apply_is_not_retried(panel, monkeypatch):
+def test_reg21_apply_is_retried_exactly_once_and_only_on_failure(panel, monkeypatch):
     """
-    Применение не сработало → команда показа НЕ повторяется.
+    Показ не подтвердился → команда применения повторяется РОВНО ОДИН раз, и
+    файл при этом НЕ переписывается.
 
-    Повтор здесь был прямым вредом. Проверка опиралась на кадр 0x0014, который
-    на панелях объекта не отвечает вовсе, поэтому не сходилась никогда - и
-    после каждого несовпадения слалась ещё одна команда применения. На живом
-    потоке это давало три переключения программы на одну карточку, то есть
-    непрерывно моргающее табло.
+    Три числа здесь одинаково важны.
 
-    Файл при этом по-прежнему пишется ровно один раз: перезапись растила бы
-    карту, для которой нет команды очистки.
+    Ноль повторов - мало: панель роняет программы случайно (замер: десять
+    карточек подряд дали шесть отказов, три показа и отказ), и вторая попытка
+    при такой доле окупается.
+
+    Три повтора вслепую - то, что было раньше и моргало табло на КАЖДОЙ
+    карточке: проверка через 0x0014 не работала в принципе, поэтому неудачей
+    объявлялся любой показ.
+
+    Файл ровно один: повтор шлёт команду показа, а не запись. Новое имя
+    добавило бы на карту ещё один неудаляемый файл, а именно их накопление
+    панель и убивает.
     """
     applies = {"n": 0}
     file_frames = []
@@ -133,13 +139,32 @@ def test_reg21_failed_apply_is_not_retried(panel, monkeypatch):
 
     monkeypatch.setattr(panel, "_session", _spy_session)
     monkeypatch.setattr(panel, "_apply_program", lambda: applies.__setitem__("n", applies["n"] + 1))
+    # Активная программа ЧУЖАЯ и не меняется — худший случай.
     monkeypatch.setattr(panel, "files_on_panel", lambda: ["0" * 32])
 
     res = panel.send_png(_tiny_png())
 
     assert res.ok is False
-    assert applies["n"] == 0, "повторное применение моргает табло и запрещено"
+    assert applies["n"] == 1, "повтор применения ровно один: ноль — мало, три — моргание"
     assert len(file_frames) == 1, "файл пишется один раз, а не на каждую попытку"
+
+
+def test_reg21_no_retry_when_first_apply_worked(panel, monkeypatch):
+    """Показ подтвердился с первой команды → повтора нет, табло не моргает."""
+    import hashlib
+
+    img = _tiny_png()
+    want = hashlib.md5(img).hexdigest()
+    applies = {"n": 0}
+
+    monkeypatch.setattr(panel, "_session", lambda sock, frames: [])
+    monkeypatch.setattr(panel, "_apply_program", lambda: applies.__setitem__("n", applies["n"] + 1))
+    monkeypatch.setattr(panel, "files_on_panel", lambda: [want])
+
+    res = panel.send_png(img)
+
+    assert res.verified is True
+    assert applies["n"] == 0, "успешный показ не должен вызывать повторное применение"
 
 
 def _sent_file_names(frames) -> list:
