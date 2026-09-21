@@ -11,8 +11,18 @@ REG-18 (LED-06): проверка показа сравнивает md5 отпр
 
 REG-19 (LED-07): при несовпадении повторяется ПРИМЕНЕНИЕ, а файл пишется
     ОДИН раз. Прежний повтор перезаписывал файл — лечил не ту стадию
-    (запись проходила, отказывало применение) и растил карту, для которой
-    нет команды очистки. Плюс имена файлов ограничены двумя слотами.
+    (запись проходила, отказывало применение).
+
+REG-20 (LED-08): имена файлов кадра и программы ОБЯЗАНЫ быть уникальными.
+    Попытка ограничить рост карты двумя фиксированными слотами выглядела
+    очевидной (команды удаления в протоколе нет) и была закреплена тестом —
+    но на живой панели 21.09.2026 она положила вывод на обоих гейтах. Замер,
+    A/B подряд на 10.30.205.76: запись в `slot_b.png` → активная программа
+    собирается из ОДНОГО файла вместо двух и на экран не встаёт; тот же кадр
+    под именем `<md5>.png` → программа собирается и применяется, подтверждено
+    кадром с камеры. Причина: карта не заменяет содержимое файла при записи по
+    существующему имени, md5 в программе перестаёт сходиться с тем, что лежит
+    на карте, и карта программу отвергает. Рост карты решается не именами.
 
 Сеть не трогаем: подменяются низкоуровневая отправка кадров, открытие
 сокета, чтение активной программы и пауза.
@@ -113,32 +123,64 @@ def test_reg19_retries_apply_not_write(panel, monkeypatch):
     assert applies["n"] == pm.APPLY_ATTEMPTS - 1, "повторяется применение между попытками"
 
 
-def test_reg19_two_slots_bound_the_card(panel):
+def _sent_file_names(frames) -> list:
+    """Имена файлов из кадров 0x0017 — так панель узнаёт, куда писать."""
+    import struct
+
+    names = []
+    for fr in frames:
+        cmd = struct.unpack("<H", fr[2:4])[0]
+        if cmd == 0x0017:
+            names.append(fr[4:].rstrip(b"\x00").decode("latin-1"))
+    return names
+
+
+def test_reg20_frame_name_is_content_unique(panel, monkeypatch):
     """
-    Имена кадров ограничены двумя слотами и чередуются — карта не растёт.
-    Проверяется на самом источнике имён (`_next_slot`), а не через разбор
-    кадров: чередование — это его контракт.
+    Кадр уходит под именем `<md5 содержимого>.png`, а НЕ под постоянным
+    слотовым именем. Переиспользование имени карта не отрабатывает: она не
+    заменяет содержимое файла, и программа отвергается (см. REG-20).
     """
-    names = [panel._next_slot() for _ in range(6)]
+    import hashlib
 
-    assert set(names) == set(SLOTS), f"имена кадров вне слотов {SLOTS}: {set(names)}"
-    assert all(a != b for a, b in zip(names, names[1:])), "слоты обязаны чередоваться"
-
-
-def test_reg19_send_png_writes_into_a_slot(panel, monkeypatch):
-    """send_png действительно пишет в слотовое имя, а не в md5-имя."""
-    captured = {}
-
-    real_next = panel._next_slot
-
-    def _spy():
-        captured["slot"] = real_next()
-        return captured["slot"]
-
-    monkeypatch.setattr(panel, "_next_slot", _spy)
-    monkeypatch.setattr(panel, "_session", lambda sock, frames: [])
+    sent = []
+    monkeypatch.setattr(panel, "_session", lambda sock, frames: sent.extend(frames) or [])
     monkeypatch.setattr(panel, "active_program_md5", lambda: "0" * 32)
 
-    panel.send_png(_tiny_png())
+    img = _tiny_png()
+    panel.send_png(img)  # rot180=False — шлём байты как есть
 
-    assert captured.get("slot") in SLOTS, "кадр должен уходить в один из двух слотов"
+    names = _sent_file_names(sent)
+    assert names, "кадры с именами файлов не найдены"
+    assert names[0] == hashlib.md5(img).hexdigest() + ".png", (
+        f"имя кадра обязано быть уникальным по содержимому, получено {names[0]!r}"
+    )
+    assert not any(n in SLOTS for n in names), (
+        f"постоянные слотовые имена ломают применение на живой панели: {names}"
+    )
+
+
+def test_reg20_two_different_cards_get_two_different_names(panel, monkeypatch):
+    """
+    Две разные карточки — два разных имени файлов, и кадра, и программы.
+    Иначе вторая карточка легла бы поверх имени первой и не применилась.
+    """
+    batches = []
+    monkeypatch.setattr(panel, "_session", lambda sock, frames: batches.append(list(frames)) or [])
+    monkeypatch.setattr(panel, "active_program_md5", lambda: "0" * 32)
+
+    first = _tiny_png()
+    # Тот же PNG с дописанным хвостом — валидный файл, но другое содержимое.
+    second = first + b"\x00"
+
+    panel.send_png(first)
+    panel.send_png(second)
+
+    # Через _session проходят и повторы ПРИМЕНЕНИЯ — в них файлов нет.
+    # Берём только пакеты, в которых реально передавались имена файлов.
+    with_files = [n for n in (_sent_file_names(b) for b in batches) if n]
+    assert len(with_files) == 2, f"ожидались две передачи файлов, получено {len(with_files)}"
+    names_a, names_b = with_files
+    assert not set(names_a) & set(names_b), (
+        f"имена файлов повторились между карточками: {names_a} vs {names_b}"
+    )
