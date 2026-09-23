@@ -20,6 +20,31 @@ REG-21 (LED-09): показ проверяется СОСТАВОМ АКТИВН
     количеству: после нескольких сотен показанных карточек в ответе
     по-прежнему две записи — кадр и boot-файл.
 
+REG-23 (LED-11): измеритель показа выбирается по тому, ОТВЕЧАЕТ ли панель, а
+    не по записанному когда-то выводу про «все панели объекта». Замер
+    23.09.2026 развёл две панели одного объекта: на 10.30.205.75 кадр
+    0x0013→0x0014 молчит (как и написано в REG-18/19), а на 10.30.205.76 он
+    отвечает устойчиво — шесть опросов из шести, один и тот же хеш. Там же
+    опровергнуто и утверждение REG-21, будто 0x0012 всегда отдаёт две записи:
+    на .76 их 89. Девяносто записей превращают проверку «наш md5 есть в
+    ответе» в тождественную истину сразу после записи — сервис отдал ok=True
+    на 20 карточках подряд (12:09–12:41), чего не бывает. Поэтому: сначала
+    0x0014, при его молчании — список файлов, и длина списка обязана быть
+    видна наружу. Молчаливо деградировавший измеритель маскирует погасшее
+    табло, и это хуже честного «не знаю».
+
+REG-24 (LED-12): длина активной программы — сторож, а в слипшуюся программу
+    НЕ ПИШЕМ. Норма измерена на исправной панели 23.09.2026 (10.30.205.75):
+    список 0x0012 заменяется целиком и остаётся длиной два — кадр и boot.
+    В тот же день 10.30.205.76 показала, чем кончается поломка замены: список
+    дорос до 231 записи, карта перестала грузить программу вовсе
+    (`ProgramIndex index="-1"`, `count="0"`, имя пустое) и экран почернел.
+    Запись необратима — команды удаления нет ни в 9527, ни в старом SDK на
+    10001 (`DeleteFiles` отвечает пустым `<out>`), — поэтому каждая карточка в
+    сломанную программу отдаляет починку. Отсюда три требования: норма равна
+    двум; порог поломки ВЫШЕ нормы, иначе гонка опроса гасила бы рабочее
+    табло; рост виден наружу ещё тогда, когда карточки показываются.
+
 REG-20 (LED-08): имена файлов кадра и программы ОБЯЗАНЫ быть уникальными.
     Попытка ограничить рост карты двумя фиксированными слотами выглядела
     очевидной (команды удаления в протоколе нет) и была закреплена тестом —
@@ -167,6 +192,75 @@ def test_reg21_no_retry_when_first_apply_worked(panel, monkeypatch):
     assert applies["n"] == 0, "успешный показ не должен вызывать повторное применение"
 
 
+def test_reg23_prefers_live_screen_answer_over_file_list(panel, monkeypatch):
+    """
+    Когда 0x0014 отвечает — верим ему, а список файлов не спрашиваем вовсе.
+
+    Случай, который это ловит: кадр лежит на карте (значит есть в 0x0012), но
+    панель показывает ДРУГУЮ программу. Проверка по списку скажет «показано»,
+    0x0014 — «нет». Панель 10.30.205.76 именно так и себя ведёт: 89 файлов в
+    списке при одной показываемой программе.
+    """
+    asked_files = {"n": 0}
+
+    def _files():
+        asked_files["n"] += 1
+        return ["a" * 32, "b" * 32, "c" * 32]
+
+    monkeypatch.setattr(panel, "active_program_md5", lambda: "f" * 32)
+    monkeypatch.setattr(panel, "files_on_panel", _files)
+
+    shown, how = panel.shown_now("a" * 32)          # наш кадр ЕСТЬ на карте
+
+    assert shown is False, "0x0014 говорит, что на экране другое — список не спорит"
+    assert "0x0014" in how
+    assert asked_files["n"] == 0, "лишний сеанс к панели, когда ответ уже есть"
+
+
+def test_reg23_falls_back_to_file_list_when_screen_answer_is_silent(panel, monkeypatch):
+    """Панель 10.30.205.75: 0x0014 молчит — работаем по списку, но говорим об этом."""
+    monkeypatch.setattr(panel, "active_program_md5", lambda: None)
+    monkeypatch.setattr(panel, "files_on_panel", lambda: ["a" * 32, "b" * 32])
+
+    shown, how = panel.shown_now("a" * 32)
+
+    assert shown is True
+    assert "0x0012" in how and "2" in how
+
+
+def test_reg23_long_file_list_is_reported_as_unreliable(panel, monkeypatch):
+    """
+    Список из 89 файлов — это уже не проверка, и наружу это обязано попасть.
+
+    Без такой отметки деградация измерителя молчалива: сервис рапортует
+    «показано» на каждой карточке, а табло может быть погасшим.
+    """
+    monkeypatch.setattr(panel, "active_program_md5", lambda: None)
+    monkeypatch.setattr(panel, "files_on_panel", lambda: ["%032x" % i for i in range(89)])
+
+    shown, how = panel.shown_now("%032x" % 7)
+
+    assert shown is True
+    assert "89" in how
+    assert "ненадёжен" in how, "длинный список обязан быть помечен как ненадёжный"
+
+
+def test_reg23_verdict_reaches_the_caller_in_detail(panel, monkeypatch):
+    """Чем проверяли — видно в `detail`, иначе разбираться придётся по логам контейнера."""
+    import hashlib
+
+    img = _tiny_png()
+    want = hashlib.md5(img).hexdigest()
+    monkeypatch.setattr(panel, "_session", lambda sock, frames: [])
+    monkeypatch.setattr(panel, "active_program_md5", lambda: want)
+    monkeypatch.setattr(panel, "files_on_panel", lambda: [want])
+
+    res = panel.send_png(img)
+
+    assert res.verified is True
+    assert "проверено: 0x0014" in res.detail
+
+
 def _sent_file_names(frames) -> list:
     """Имена файлов из кадров 0x0017 — так панель узнаёт, куда писать."""
     import struct
@@ -228,3 +322,104 @@ def test_reg20_two_different_cards_get_two_different_names(panel, monkeypatch):
     assert not set(names_a) & set(names_b), (
         f"имена файлов повторились между карточками: {names_a} vs {names_b}"
     )
+
+
+def test_reg24_healthy_program_is_exactly_two_files(panel, monkeypatch):
+    """
+    Норма активной программы — кадр и boot, ровно два файла.
+
+    Измерено на исправной панели 23.09.2026 (10.30.205.75): до карточки список
+    0x0012 был ['2e4c0b31', '97668a76'], после — ['0aecf8ad', '806e601e'].
+    Заменился целиком, длина прежняя. Панель программу ЗАМЕНЯЕТ.
+    """
+    monkeypatch.setattr(panel, "files_on_panel", lambda: ["a" * 32, "b" * 32])
+
+    n, broken = panel.program_health()
+
+    assert n == pm.EXPECTED_PROGRAM_FILES
+    assert broken is False
+
+
+def test_reg24_refuses_to_write_into_a_bloated_program(panel, monkeypatch):
+    """
+    В слипшуюся программу карточка НЕ пишется — и это главное в REG-24.
+
+    Запись здесь необратима: команды удаления нет ни в протоколе 9527, ни в
+    старом SDK на 10001 (там `DeleteFiles` отвечает пустым `<out>`). Значит
+    каждая карточка, отправленная в уже сломанную программу, удлиняет её
+    навсегда и отдаляет починку.
+
+    Так была потеряна панель 10.30.205.76: список рос с каждой проезжающей
+    машиной до 231 записи, после чего карта перестала грузить программу вовсе
+    и экран почернел. Одного опроса перед записью хватило бы, чтобы
+    остановиться в самом начале.
+    """
+    wrote = []
+    monkeypatch.setattr(panel, "files_on_panel", lambda: ["%032x" % i for i in range(40)])
+    monkeypatch.setattr(panel, "_session", lambda sock, frames: wrote.append(frames) or [])
+
+    res = panel.send_png(_tiny_png())
+
+    assert res.ok is False
+    assert res.degraded is True
+    assert res.program_files == 40
+    assert wrote == [], "в сломанную программу ничего писать нельзя"
+    assert "копит ссылки" in res.detail
+
+
+def test_reg24_single_extra_file_does_not_silence_a_working_board(panel, monkeypatch):
+    """
+    Один лишний файл — не повод гасить рабочее табло.
+
+    Между нашей заливкой и опросом есть гонка, и порог в два файла ровно
+    означал бы отказ обслуживать панель из-за одного неудачно попавшего
+    опроса. Поэтому «сломана» начинается заметно выше нормы.
+    """
+    monkeypatch.setattr(panel, "files_on_panel", lambda: ["a" * 32, "b" * 32, "c" * 32])
+
+    n, broken = panel.program_health()
+
+    assert n == 3
+    assert broken is False, "порог поломки не должен совпадать с нормой"
+
+
+def test_reg24_growth_is_reported_even_when_the_card_is_shown(panel, monkeypatch):
+    """
+    Слипание видно ДО того, как экран погаснет.
+
+    Пока список растёт, карточки ещё показываются — именно в этом окне отказ и
+    надо ловить. Если `degraded` поднимается только вместе с чернотой, сигнал
+    приходит тогда, когда чинить уже поздно и дорого.
+    """
+    import hashlib
+
+    img = _tiny_png()
+    want = hashlib.md5(img).hexdigest()
+    files = [want] + ["%032x" % i for i in range(4)]
+    monkeypatch.setattr(panel, "_session", lambda sock, frames: [])
+    monkeypatch.setattr(panel, "active_program_md5", lambda: want)
+    monkeypatch.setattr(panel, "files_on_panel", lambda: files)
+
+    res = panel.send_png(img)
+
+    assert res.verified is True, "карточка показана — отказывать нельзя"
+    assert res.degraded is True, "но рост обязан быть виден уже сейчас"
+    assert res.program_files == 5
+
+
+def test_reg24_unreachable_panel_is_not_called_broken(panel, monkeypatch):
+    """
+    Пропавшая панель — не сломанная программа.
+
+    Это разные беды с разным лечением, и путать их значит переставать писать в
+    исправное табло из-за одного потерянного пакета.
+    """
+    def _boom():
+        raise OSError("нет связи")
+
+    monkeypatch.setattr(panel, "files_on_panel", _boom)
+
+    n, broken = panel.program_health()
+
+    assert broken is False
+    assert n == 0
