@@ -21,7 +21,7 @@ from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
 from .config import settings
-from .panel import Panel, udp_status
+from .panel import EXPECTED_PROGRAM_FILES, Panel, udp_status
 from .render import render_card
 
 app = FastAPI(
@@ -87,6 +87,14 @@ def _result(res, info: dict | None = None) -> dict:
         "md5": res.md5,
         "detail": res.detail,
         "files_on_panel": res.files_on_panel,
+        # Длина активной программы и признак слипания уходят В КАЖДОМ ответе.
+        #
+        # Не «по запросу» и не только в /health: 23.09.2026 панель объекта
+        # час показывала чёрный экран, а сервис на каждой карточке отвечал
+        # ok=true. Вызывающий не мог узнать правду, даже если бы хотел -
+        # её просто не было в ответе.
+        "program_files": res.program_files,
+        "degraded": res.degraded,
     }
     if info:
         out["render"] = info
@@ -96,8 +104,24 @@ def _result(res, info: dict | None = None) -> dict:
 @app.get("/health", summary="Жив ли сервис и сама панель")
 async def health():
     st = await run_in_threadpool(udp_status, settings.host)
+    n_files, broken = await run_in_threadpool(panel.program_health)
     return {
         "service": "ok",
+        # Состояние ПРОГРАММЫ, а не только железа.
+        #
+        # Прежний /health отвечал «panel online, screen_on, playing» и по всем
+        # трём признакам сломанная панель выглядела исправной: она и правда
+        # была онлайн, экран включён, PlayStatus=1. Только играть ей было
+        # нечего - программа не грузилась. Мониторинг такого не видел.
+        "program": {
+            "files": n_files,
+            "expected": EXPECTED_PROGRAM_FILES,
+            "degraded": broken,
+            "note": (
+                "панель копит ссылки вместо замены программы; удалить их нечем, "
+                "нужна чистка карты" if broken else "норма"
+            ),
+        },
         "panel": {
             "host": settings.host,
             "online": st.online,
