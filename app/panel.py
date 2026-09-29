@@ -737,7 +737,7 @@ class Panel:
             try:
                 shown, files_now = self._screen_fresh()
                 self.last_trace["shown_first"] = shown or ""
-                if shown != md5:
+                if not self._is_ours(md5, shown, files_now):
                     self.last_trace["show_retried"] = True
                     # РОВНО ОДНА повторная команда показа. Панель роняет
                     # программы случайно (замер 21.09.2026: десять карточек
@@ -746,8 +746,7 @@ class Panel:
                     # переписывается - только команда показа.
                     self._reapply_fresh()
                     time.sleep(APPLY_WAIT)
-                    shown2, files2 = self._screen_fresh()
-                    shown = shown2 or shown
+                    shown, files2 = self._screen_fresh()
                     files_now = files2 or files_now
             except OSError as e:
                 # Запись уже состоялась - это не «панель недоступна».
@@ -758,22 +757,40 @@ class Panel:
         files_now = files_now or files
         self.last_trace["shown_after"] = shown or ""
         self.last_trace["files_after"] = len(files_now)
+        self.last_trace["measured_by"] = "0x0014" if shown is not None else "0x0012"
         degraded = len(files_now) > EXPECTED_PROGRAM_FILES
-        if shown == md5:
+        if self._is_ours(md5, shown, files_now):
+            how = ("0x0014 (что на экране сейчас)" if shown is not None else
+                   f"0x0012, файлов в ответе {len(files_now)} - 0x0014 молчит, "
+                   f"видно только что кадр в активной программе")
             return SendResult(True, True, md5, files_on_panel=files_now,
                               program_files=len(files_now), degraded=degraded,
-                              detail=f"показывается ({slot}); проверено: 0x0014 (что на экране сейчас)")
+                              detail=f"показывается ({slot}); проверено: {how}")
 
         return SendResult(
             False, False, md5, files_on_panel=files_now,
             program_files=len(files_now), degraded=degraded,
             detail=(
                 f"кадр записан в {slot}, но на экране "
-                f"{shown or 'ничего не показано'} - панель проглотила карточку. "
+                f"{shown or 'не наш кадр (по списку 0x0012)'} - панель проглотила карточку. "
                 f"В активной программе {len(files_now)} файлов при норме "
                 f"{EXPECTED_PROGRAM_FILES}."
             ),
         )
+
+    @staticmethod
+    def _is_ours(md5: str, shown: str | None, files: list[str]) -> bool:
+        """
+        Наш ли кадр на экране - по тому же правилу, что и shown_now().
+
+        0x0014 ответил - верим только ему. Промолчал (29.09.2026 молчит на обеих
+        панелях, шесть опросов из шести) - это «измерителя нет», а не «не
+        показано»: меряем списком 0x0012. Он слабее, и поэтому в detail всегда
+        написано, чем измерено.
+        """
+        if shown is not None:
+            return shown == md5
+        return md5 in files
 
     def blank(self, width: int = 160, height: int = 160) -> SendResult:
         """Погасить экран: сплошной чёрный кадр."""

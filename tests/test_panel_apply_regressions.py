@@ -528,3 +528,40 @@ def test_failed_check_after_write_is_not_reported_as_unreachable(panel, monkeypa
 
     assert res.ok is True and res.verified is False
     assert "недоступна" not in res.detail and "проверка показа не удалась" in res.detail
+
+
+def test_silent_0x0014_is_measured_by_file_list_without_retry(panel, monkeypatch):
+    """
+    29.09.2026: 0x0014 молчит на обеих панелях. Молчание - «измерителя нет»,
+    а не «не показано»: иначе каждая карточка получала лишний повтор показа и
+    verified=False.
+    """
+    want = hashlib.md5(_tiny_png()).hexdigest()
+    retries = []
+
+    def _spy(frames, cmds):
+        if set(cmds) == {0x001D, 0x001F}:
+            retries.append(cmds)
+
+    monkeypatch.setattr(panel, "_session", _fake_card([want, "b" * 32], shown=None, spy=_spy))
+
+    res = panel.send_png(_tiny_png())
+
+    assert res.ok is True and res.verified is True
+    assert "0x0012" in res.detail and "0x0014 молчит" in res.detail, "видно, чем измерено"
+    assert retries == [] and panel.last_trace["measured_by"] == "0x0012"
+
+
+def test_silent_0x0014_and_frame_missing_retries_once(panel, monkeypatch):
+    retries = []
+
+    def _spy(frames, cmds):
+        if set(cmds) == {0x001D, 0x001F}:
+            retries.append(cmds)
+
+    monkeypatch.setattr(panel, "_session", _fake_card(["a" * 32, "b" * 32], shown=None, spy=_spy))
+
+    res = panel.send_png(_tiny_png())
+
+    assert res.ok is False and res.verified is False
+    assert len(retries) == 1
