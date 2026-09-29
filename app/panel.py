@@ -350,6 +350,18 @@ def _frame(cmd: int, payload: bytes = b"") -> bytes:
     return struct.pack("<HH", 4 + len(payload), cmd) + payload
 
 
+def _clear_frame(n_files: int) -> bytes:
+    """
+    0x0015 со списком индексов 0..N-1 (не меньше 8): панель убирает из
+    программы все накопленные файлы перед записью новой карточки.
+
+    С пустым телом (как было до 28.09.2026) команда ничего не чистила, и
+    программа копила по файлу на каждую машину. Проверено на объекте: 279 -> 2.
+    """
+    count = max(8, n_files)
+    return _frame(0x0015, b"".join(struct.pack("<I", i) for i in range(count)))
+
+
 def _file_frames(name: str, data: bytes) -> list[bytes]:
     out = [_frame(0x0017, name.encode("latin-1") + b"\x00")]
     for i in range(0, len(data), CHUNK):
@@ -665,26 +677,18 @@ class Panel:
                     files = self._files_from(answers)
                     n_files = len(files)
 
-                    # Порядок именно такой, потому что запись необратима: удалить
-                    # файл из программы нечем ни в протоколе 9527, ни через старый
-                    # SDK. Каждая карточка, записанная в уже слипшуюся программу,
-                    # делает её длиннее и отдаляет починку. Так была потеряна
-                    # панель 10.30.205.76.
-                    if False:  # CLAUDE fix: 0x0015[0..N] clears accumulation, hard-stop removed
-                        return SendResult(
-                            False, False, "", files_on_panel=files,
-                            program_files=n_files, degraded=True,
-                            detail=(
-                                f"панель не заменяет программу, а копит ссылки: в активной "
-                                f"программе {n_files} файлов вместо {EXPECTED_PROGRAM_FILES}. "
-                                f"Карточка НЕ отправлена намеренно - удалить записи нечем, и "
-                                f"каждая новая только усугубляет. Нужна чистка карты."
-                            ),
-                        )
+                    # Раздутая программа больше не повод отказывать в записи.
+                    # Раньше здесь стоял жёсткий отказ (REG-24): считалось, что
+                    # удалить файл из программы нечем, и каждая карточка удлиняет
+                    # её навсегда - так была потеряна панель 10.30.205.76.
+                    # 28.09.2026 на объекте нашли, что 0x0015 со списком ВСЕХ
+                    # индексов программы убирает накопленное: у .76 было 279
+                    # файлов, после первой записи стало 2. Поэтому очистка идёт
+                    # каждой записью (см. _clear_frame), а отказ снят.
 
                     # 2. Запись и применение — в этом же соединении.
                     self._session(sock, [
-                        _frame(0x0011), _frame(0x0013), _frame(0x0015, b"".join(struct.pack("<I", _i) for _i in range(max(8, n_files)))),
+                        _frame(0x0011), _frame(0x0013), _clear_frame(n_files),
                         *_file_frames(slot, img),
                         *_file_frames(boot, xml_bytes),
                         _frame(0x001D), _frame(0x001F),

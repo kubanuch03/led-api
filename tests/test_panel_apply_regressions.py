@@ -373,20 +373,18 @@ def test_reg24_healthy_program_is_exactly_two_files(panel, monkeypatch):
     assert broken is False
 
 
-def test_reg24_refuses_to_write_into_a_bloated_program(panel, monkeypatch):
+def test_reg24_bloated_program_is_cleared_and_card_written(panel, monkeypatch):
     """
-    В слипшуюся программу карточка НЕ пишется — и это главное в REG-24.
+    Раздутая программа чистится той же записью, а карточка пишется.
 
-    Запись здесь необратима: команды удаления нет ни в протоколе 9527, ни в
-    старом SDK на 10001 (там `DeleteFiles` отвечает пустым `<out>`, а на
-    прошивке 7.10.94.0 метода нет вовсе). Значит каждая карточка, отправленная
-    в уже сломанную программу, удлиняет её навсегда и отдаляет починку.
-
-    Так была потеряна панель 10.30.205.76: список рос с каждой проезжающей
-    машиной до 231 записи, после чего карта перестала грузить программу вовсе
-    и экран почернел. Одного опроса перед записью хватило бы, чтобы
-    остановиться в самом начале.
+    До 28.09.2026 здесь был отказ писать: считалось, что удалить файл из
+    программы нечем, и каждая карточка удлиняет её навсегда (так почернела
+    панель 10.30.205.76, 231 -> 279 записей). На объекте нашли, что 0x0015
+    со списком ВСЕХ индексов убирает накопленное: 279 -> 2 после первой
+    записи. Тест сторожит обе половины: запись не блокируется, и очистка
+    перечисляет каждый индекс раздутой программы, а не пустое тело.
     """
+    import struct
     wrote = []
 
     def _spy(frames, cmds):
@@ -398,11 +396,13 @@ def test_reg24_refuses_to_write_into_a_bloated_program(panel, monkeypatch):
 
     res = panel.send_png(_tiny_png())
 
-    assert res.ok is False
-    assert res.degraded is True
     assert res.program_files == 40
-    assert wrote == [], "в сломанную программу ничего писать нельзя"
-    assert "копит ссылки" in res.detail
+    assert wrote, "раздутая программа больше не повод отказывать в записи"
+    clear = [f for f in wrote[0] if f[2:4] == b"\x15\x00"]
+    assert clear, "перед записью должна идти очистка 0x0015"
+    payload = clear[0][4:]
+    assert [struct.unpack("<I", payload[i:i + 4])[0] for i in range(0, len(payload), 4)] == list(range(40))
+
 
 def test_reg24_single_extra_file_does_not_silence_a_working_board(panel, monkeypatch):
     """
