@@ -8,6 +8,10 @@ services:
       - "8841:8000"
     environment:
       HD_HOST: "10.30.205.75"
+      # Журнал карточек (app/cardlog.py): logs/leds/75/<ГГГГ>/<ММ>/<ДД>/ -
+      # panel.log, cards.jsonl и картинки images/. Каталог - logs/ прода.
+      LED_LOG_DIR: "/logs/leds"
+      LED_PANEL_ID: "75"
       HD_DEVICE_ID: "C16L-B25-1BA54"
       HD_WIDTH: "160"
       HD_HEIGHT: "160"
@@ -16,6 +20,8 @@ services:
       HD_TZ_OFFSET: "6"
       # Сколько ждать освобождения панели перед 429. Значение — в .env
       HD_BUSY_WAIT: "${HD_BUSY_WAIT:-3}"
+    volumes:
+      - "${LED_LOG_HOST_DIR:-../prod/logs/leds}:/logs/leds"
     networks:
       - prod_db_network
 
@@ -28,6 +34,10 @@ services:
       - "8842:8000"
     environment:
       HD_HOST: "10.30.205.76"
+      # Журнал карточек (app/cardlog.py): logs/leds/76/<ГГГГ>/<ММ>/<ДД>/ -
+      # panel.log, cards.jsonl и картинки images/. Каталог - logs/ прода.
+      LED_LOG_DIR: "/logs/leds"
+      LED_PANEL_ID: "76"
       HD_DEVICE_ID: "C16L-B25-07457"
       HD_WIDTH: "160"
       HD_HEIGHT: "160"
@@ -35,6 +45,8 @@ services:
       HD_WHITE: "255"
       HD_TZ_OFFSET: "6"
       HD_BUSY_WAIT: "${HD_BUSY_WAIT:-3}"
+    volumes:
+      - "${LED_LOG_HOST_DIR:-../prod/logs/leds}:/logs/leds"
     networks:
       - prod_db_network
 

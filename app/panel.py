@@ -408,6 +408,11 @@ class Panel:
         self.device_id = device_id
         self.rot180 = rot180
         self._lock = threading.Lock()
+        #: Подробности последней отправки для журнала карточек (app/cardlog.py):
+        #: файлов в программе до записи, сколько индексов ушло в очистку 0x0015,
+        #: имя файла на карте, что показывает экран после, был ли повтор показа.
+        #: Отправки сериализованы _lock, поэтому трасса - всегда текущей карточки.
+        self.last_trace: dict = {}
         self.last_sent: bytes | None = None
         self.last_md5: str | None = None
         # Начинаем со второго слота, чтобы первый же кадр после старта сервиса
@@ -651,6 +656,7 @@ class Panel:
             except Exception as e:                  # битый PNG — показать важнее, чем повернуть
                 return SendResult(False, False, "", detail=f"не удалось повернуть PNG: {e}")
 
+        self.last_trace = {}
         md5 = hashlib.md5(img).hexdigest()
         w, h = png_size(img)
         w, h = int(width or w), int(height or h)
@@ -676,6 +682,11 @@ class Panel:
                     answers = self._session(sock, self._handshake())
                     files = self._files_from(answers)
                     n_files = len(files)
+                    self.last_trace = {
+                        "files_before": n_files,
+                        "cleared_indexes": max(8, n_files),
+                        "slot": slot,
+                    }
 
                     # Раздутая программа больше не повод отказывать в записи.
                     # Раньше здесь стоял жёсткий отказ (REG-24): считалось, что
@@ -709,7 +720,9 @@ class Panel:
                         sock, [_frame(0x0011), _frame(0x0011), _frame(0x0013)])
                     shown, files_now = self._active_from(answers), self._files_from(answers)
 
+                    self.last_trace["shown_first"] = shown or ""
                     if shown != md5:
+                        self.last_trace["show_retried"] = True
                         # РОВНО ОДНА повторная команда показа, в том же соединении.
                         # Панель роняет программы случайно (замер 21.09.2026: десять
                         # карточек подряд дали «нет, нет, нет, нет, нет, нет, да, да,
@@ -740,6 +753,8 @@ class Panel:
                                       detail=f"кадр записан в {slot}, проверка показа не удалась: {e}")
 
         files_now = files_now or files
+        self.last_trace["shown_after"] = shown or ""
+        self.last_trace["files_after"] = len(files_now)
         degraded = len(files_now) > EXPECTED_PROGRAM_FILES
         if shown == md5:
             return SendResult(True, True, md5, files_on_panel=files_now,

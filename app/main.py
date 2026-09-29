@@ -12,7 +12,9 @@
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import datetime as dt
+import time
 from typing import Literal
 
 from fastapi import Depends, FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -20,6 +22,7 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import Response
 from pydantic import BaseModel, Field
 
+from . import cardlog
 from .config import settings
 from .panel import EXPECTED_PROGRAM_FILES, Panel, udp_status
 from .render import render_card
@@ -78,6 +81,42 @@ async def _send(png: bytes, verify: bool = True):
                                        settings.height, verify)
     finally:
         _busy.release()
+
+
+def _panel_status() -> dict:
+    """UDP-статус панели после отправки - в журнал карточек (только чтение)."""
+    try:
+        st = udp_status(settings.host)
+        return {k: v for k, v in dataclasses.asdict(st).items()} if dataclasses.is_dataclass(st) \
+            else {k: getattr(st, k, None) for k in
+                  ("online", "device_id", "ip", "mac", "width", "height", "screen_on",
+                   "playing", "program", "locked", "error")}
+    except Exception as exc:  # журнал не должен ронять отправку
+        return {"error": f"статус не получен: {exc}"}
+
+
+async def _send_logged(endpoint: str, request: dict, png: bytes, info: dict | None,
+                       verify: bool = True):
+    """_send + журнал карточек (app/cardlog.py): данные, картинка, все флаги ответа."""
+    started = time.time()
+    try:
+        res = await _send(png, verify)
+    except HTTPException as exc:
+        cardlog.write(settings=settings, endpoint=endpoint, request=request, png=png,
+                      render_info=info, http_status=exc.status_code, error=str(exc.detail),
+                      started=started, finished=time.time())
+        raise
+    except Exception as exc:
+        cardlog.write(settings=settings, endpoint=endpoint, request=request, png=png,
+                      render_info=info, http_status=500, error=repr(exc),
+                      started=started, finished=time.time())
+        raise
+    trace = dict(panel.last_trace)
+    trace["panel_status_after"] = await run_in_threadpool(_panel_status)
+    cardlog.write(settings=settings, endpoint=endpoint, request=request, png=png,
+                  render_info=info, result=res, trace=trace,
+                  started=started, finished=time.time())
+    return res
 
 
 def _result(res, info: dict | None = None) -> dict:
@@ -162,7 +201,7 @@ async def card(req: CardRequest):
         qr_pct=req.qr_pct, pos=req.pos,
         white=req.white if req.white is not None else settings.white, ecc=req.ecc,
     )
-    res = await _send(png, req.verify)
+    res = await _send_logged("/card", req.model_dump(), png, info, req.verify)
     return _result(res, info)
 
 
@@ -185,7 +224,10 @@ async def card_form(
         width=settings.width, height=settings.height, qr_pct=qr_pct, pos=pos,
         white=white if white is not None else settings.white, ecc=ecc,
     )
-    res = await _send(png, verify)
+    request = {"qr": qr, "qr_image_bytes": len(blob) if blob else 0, "plate": plate,
+               "amount": amount, "time": time, "dur": dur, "qr_pct": qr_pct, "pos": pos,
+               "white": white, "ecc": ecc, "verify": verify}
+    res = await _send_logged("/card/form", request, png, info, verify)
     return _result(res, info)
 
 
@@ -215,7 +257,7 @@ async def image(file: UploadFile = File(...), verify: bool = Form(True)):
     data = await file.read()
     if not data.startswith(b"\x89PNG\r\n\x1a\n"):
         raise HTTPException(422, "нужен PNG (глубина 8 бит, без interlace)")
-    res = await _send(data, verify)
+    res = await _send_logged("/image", {"file": file.filename, "verify": verify}, data, None, verify)
     return _result(res)
 
 
