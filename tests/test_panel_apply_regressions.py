@@ -59,6 +59,7 @@ REG-20 (LED-08): имена файлов кадра и программы ОБЯ
 Сеть не трогаем: подменяются низкоуровневая отправка кадров, открытие
 сокета, чтение активной программы и пауза.
 """
+import hashlib
 import socket
 import sys
 from pathlib import Path
@@ -457,3 +458,73 @@ def test_reg24_unreachable_panel_is_not_called_broken(panel, monkeypatch):
 
     assert broken is False
     assert n == 0
+
+
+def test_broken_pipe_after_apply_does_not_hide_shown_card(panel, monkeypatch):
+    """
+    29.09.2026: после 0x001D/0x001F панель закрывает соединение записи.
+
+    Проверка в том же сокете давала Broken pipe, и сервис отвечал «панель
+    недоступна» на карточку, которая уже была на экране. Проверка теперь идёт
+    по новому соединению: каждое соединение - свой сокет, и сокет записи после
+    применения мёртв.
+    """
+    import struct
+
+    md5 = hashlib.md5(_tiny_png()).hexdigest()
+    conns = []
+
+    class _Sock(_FakeSock):
+        def __init__(self):
+            super().__init__()
+            self.applied = False
+
+    def _conn(*a, **k):
+        s = _Sock()
+        conns.append(s)
+        return s
+
+    def _session(sock, frames):
+        cmds = [struct.unpack("<H", fr[2:4])[0] for fr in frames]
+        if sock.applied:
+            raise BrokenPipeError(32, "Broken pipe")
+        if 0x0017 in cmds:
+            sock.applied = 0x001D in cmds
+            return []
+        if 0x0013 in cmds and 0x0015 not in cmds:
+            return _answers(["a" * 32], md5)
+        return _answers(["a" * 32])
+
+    monkeypatch.setattr(pm.socket, "create_connection", _conn)
+    monkeypatch.setattr(panel, "_session", _session)
+
+    res = panel.send_png(_tiny_png())
+
+    assert res.ok is True and res.verified is True, res.detail
+    assert panel.last_trace.get("show_retried") is None, "повтор показа не нужен"
+    assert len(conns) == 2, "запись+применение и одна проверка"
+
+
+def test_failed_check_after_write_is_not_reported_as_unreachable(panel, monkeypatch):
+    """Запись прошла, проверка не удалась: ok=True, verified=False, не «панель недоступна»."""
+    import struct
+
+    calls = {"n": 0}
+
+    def _conn(*a, **k):
+        calls["n"] += 1
+        if calls["n"] > 1:
+            raise ConnectionRefusedError(111, "Connection refused")
+        return _FakeSock()
+
+    def _session(sock, frames):
+        cmds = [struct.unpack("<H", fr[2:4])[0] for fr in frames]
+        return [] if 0x0017 in cmds else _answers(["a" * 32])
+
+    monkeypatch.setattr(pm.socket, "create_connection", _conn)
+    monkeypatch.setattr(panel, "_session", _session)
+
+    res = panel.send_png(_tiny_png())
+
+    assert res.ok is True and res.verified is False
+    assert "недоступна" not in res.detail and "проверка показа не удалась" in res.detail

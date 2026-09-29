@@ -622,28 +622,40 @@ class Panel:
                 return found[0].decode() if found else None
         return None
 
+    def _screen_fresh(self) -> tuple[str | None, list[str]]:
+        """Что на экране (0x0014) и список программы (0x0012) - по новому соединению."""
+        with socket.create_connection((self.host, PORT), timeout=self.timeout) as sock:
+            sock.settimeout(self.timeout)
+            answers = self._session(
+                sock, self._handshake()[:-1] + [_frame(0x0011), _frame(0x0011), _frame(0x0013)])
+        return self._active_from(answers), self._files_from(answers)
+
+    def _reapply_fresh(self) -> None:
+        """Повторная команда показа (0x001D/0x001F) по новому соединению, без записи."""
+        with socket.create_connection((self.host, PORT), timeout=self.timeout) as sock:
+            sock.settimeout(self.timeout)
+            self._session(sock, self._handshake())
+            self._session(sock, [_frame(0x001D), _frame(0x001F)])
+
     def send_png(self, img: bytes, width: int | None = None, height: int | None = None,
                  verify: bool = True) -> SendResult:
         """
         Показать PNG на весь экран и убедиться, что панель его ПОКАЗЫВАЕТ.
 
-        ⚠️ ВСЁ ДЕЛАЕТСЯ В ОДНОМ СОЕДИНЕНИИ, и это не стилистика.
+        ⚠️ ЗАПИСЬ И ПРИМЕНЕНИЕ - В ОДНОМ СОЕДИНЕНИИ, ПРОВЕРКА - В НОВОМ.
 
         Карта принимает РОВНО ОДНО подключение на 9527: пока сессия открыта,
-        остальные получают `Connection refused` (проверено 26.09.2026 - внешний
-        клиент держал сессию, и led-api не смог подключиться вовсе).
+        остальные получают `Connection refused` (проверено 26.09.2026). Поэтому
+        соединения идут строго по очереди под self._lock, и их немного:
+        запись+применение, затем проверка, и только при неудаче - повтор
+        показа и ещё одна проверка.
 
-        Прежняя версия открывала на одну карточку от шести до девяти соединений:
-        опрос перед записью, запись, список файлов, «что на экране», при неудаче
-        повтор применения и снова две проверки - каждое с полным рукопожатием.
-        На потоке машин это выстраивало к однопоточному устройству очередь,
-        которую оно не переваривало: 25.09.2026 с 19:57 до 20:53 в логе сплошные
-        `Read timeout`, и именно на их фоне список файлов вырос с 2 до 8.
-
-        Здесь: рукопожатие (его последний кадр 0x0011 уже приносит список файлов,
-        так что отдельный опрос перед записью не нужен) -> запись -> применение
-        -> проверка. Одно соединение. Запасная проверка отдельным соединением
-        делается только если карта промолчала в первом.
+        Прежняя версия открывала на одну карточку от шести до девяти соединений,
+        что 25.09.2026 дало сплошные `Read timeout` с 19:57 до 20:53. Но и
+        версия «всё в одном» не работала: после 0x001D/0x001F панель закрывает
+        соединение, проверка в том же сокете молчала, а повтор падал с
+        Broken pipe - карточка на экране, а сервис отвечает «панель недоступна»
+        (29.09.2026, обе панели).
 
         Различие между «записан» и «показан» прежнее и принципиальное: панель
         принимает файлы исправно даже когда перестала применять программы.
@@ -704,53 +716,44 @@ class Panel:
                         *_file_frames(boot, xml_bytes),
                         _frame(0x001D), _frame(0x001F),
                     ])
-                    time.sleep(2)                   # карта дочитывает программу
-
-                    self.last_sent, self.last_md5 = img, md5
-                    if not verify:
-                        return SendResult(True, False, md5, files_on_panel=files,
-                                          program_files=n_files,
-                                          detail=f"кадр записан в {slot}, показ не проверялся")
-
-                    # 3. Проверка — тоже здесь. 0x0014 отвечает на нужный вопрос
-                    #    «что на экране сейчас»; 0x0012 в длинном списке ничего не
-                    #    доказывает и идёт в detail как предупреждение.
-                    time.sleep(APPLY_WAIT)
-                    answers = self._session(
-                        sock, [_frame(0x0011), _frame(0x0011), _frame(0x0013)])
-                    shown, files_now = self._active_from(answers), self._files_from(answers)
-
-                    self.last_trace["shown_first"] = shown or ""
-                    if shown != md5:
-                        self.last_trace["show_retried"] = True
-                        # РОВНО ОДНА повторная команда показа, в том же соединении.
-                        # Панель роняет программы случайно (замер 21.09.2026: десять
-                        # карточек подряд дали «нет, нет, нет, нет, нет, нет, да, да,
-                        # да, нет»), поэтому вторая попытка окупается. Моргнуть может
-                        # только та карточка, что действительно не встала.
-                        self._session(sock, [_frame(0x001D), _frame(0x001F)])
-                        time.sleep(APPLY_WAIT)
-                        answers = self._session(
-                            sock, [_frame(0x0011), _frame(0x0011), _frame(0x0013)])
-                        shown = self._active_from(answers) or shown
-                        files_now = self._files_from(answers) or files_now
             except OSError as e:
-                return SendResult(False, False, md5, detail=f"панель недоступна: {e}")
+                return SendResult(False, False, md5, detail=f"панель недоступна при записи: {e}")
 
-            # Карта промолчала в своём же сеансе — одна отдельная проверка, и только
-            # тогда. Это единственный случай, когда соединений становится два.
-            if verify and shown is None and not files_now:
-                try:
-                    with socket.create_connection((self.host, PORT), timeout=self.timeout) as sock:
-                        sock.settimeout(self.timeout)
-                        answers = self._session(
-                            sock, self._handshake()[:-1]
-                            + [_frame(0x0011), _frame(0x0011), _frame(0x0013)])
-                    shown, files_now = self._active_from(answers), self._files_from(answers)
-                except OSError as e:
-                    return SendResult(True, False, md5, files_on_panel=files,
-                                      program_files=n_files,
-                                      detail=f"кадр записан в {slot}, проверка показа не удалась: {e}")
+            self.last_sent, self.last_md5 = img, md5
+            if not verify:
+                return SendResult(True, False, md5, files_on_panel=files,
+                                  program_files=n_files,
+                                  detail=f"кадр записан в {slot}, показ не проверялся")
+
+            # 3. Проверка - по НОВОМУ соединению.
+            #
+            # После применения программы (0x001D/0x001F) панель закрывает
+            # соединение: в том же сокете вопрос «что на экране» оставался без
+            # ответа, а повторный показ падал с Broken pipe. Сервис при этом
+            # отвечал «панель недоступна» на КАЖДУЮ карточку, хотя она была на
+            # экране (замер 29.09.2026: обе панели, /screen по новому
+            # соединению - showing_ours=True для карточек с Broken pipe).
+            time.sleep(2 + APPLY_WAIT)          # карта дочитывает и применяет программу
+            try:
+                shown, files_now = self._screen_fresh()
+                self.last_trace["shown_first"] = shown or ""
+                if shown != md5:
+                    self.last_trace["show_retried"] = True
+                    # РОВНО ОДНА повторная команда показа. Панель роняет
+                    # программы случайно (замер 21.09.2026: десять карточек
+                    # подряд дали «нет, нет, нет, нет, нет, нет, да, да, да,
+                    # нет»), поэтому вторая попытка окупается. Файл при этом не
+                    # переписывается - только команда показа.
+                    self._reapply_fresh()
+                    time.sleep(APPLY_WAIT)
+                    shown2, files2 = self._screen_fresh()
+                    shown = shown2 or shown
+                    files_now = files2 or files_now
+            except OSError as e:
+                # Запись уже состоялась - это не «панель недоступна».
+                return SendResult(True, False, md5, files_on_panel=files,
+                                  program_files=n_files,
+                                  detail=f"кадр записан в {slot}, проверка показа не удалась: {e}")
 
         files_now = files_now or files
         self.last_trace["shown_after"] = shown or ""
