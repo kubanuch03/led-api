@@ -1,20 +1,43 @@
 services:
-  led_api:
+  led_api_75:
     build: .
-    container_name: led_api
+    image: lrd-api-led_api
+    container_name: led_api_75
     restart: unless-stopped
     ports:
-      - "8840:8000"
+      - "8841:8000"
     environment:
-      # Адрес LED-панели в сети парковки (раньше была на link-local 169.254.255.254).
-      HD_HOST: "${HD_HOST:-10.30.205.20}"
-      HD_DEVICE_ID: "${HD_DEVICE_ID:-C16L-B25-07457}"
-      HD_WIDTH: "${HD_WIDTH:-160}"
-      HD_HEIGHT: "${HD_HEIGHT:-160}"
-      # Панель выводит кадр повёрнутым на 180° — сервис поворачивает перед отправкой.
-      HD_ROT180: "${HD_ROT180:-1}"
-      # 255 на солнце, 170-200 в тени и ночью.
-      HD_WHITE: "${HD_WHITE:-255}"
-      HD_TZ_OFFSET: "${HD_TZ_OFFSET:-6}"
-      # Пусто — сервис открыт. Задайте токен, если он смотрит наружу.
-      API_TOKEN: "${API_TOKEN:-}"
+      HD_HOST: "10.30.205.75"
+      HD_DEVICE_ID: "C16L-B25-1BA54"
+      HD_WIDTH: "160"
+      HD_HEIGHT: "160"
+      HD_ROT180: "1"
+      HD_WHITE: "255"
+      HD_TZ_OFFSET: "6"
+      # Сколько ждать освобождения панели перед 429. Значение — в .env
+      HD_BUSY_WAIT: "${HD_BUSY_WAIT:-3}"
+    networks:
+      - prod_db_network
+
+  led_api_76:
+    build: .
+    image: lrd-api-led_api
+    container_name: led_api_76
+    restart: unless-stopped
+    ports:
+      - "8842:8000"
+    environment:
+      HD_HOST: "10.30.205.76"
+      HD_DEVICE_ID: "C16L-B25-07457"
+      HD_WIDTH: "160"
+      HD_HEIGHT: "160"
+      HD_ROT180: "1"
+      HD_WHITE: "255"
+      HD_TZ_OFFSET: "6"
+      HD_BUSY_WAIT: "${HD_BUSY_WAIT:-3}"
+    networks:
+      - prod_db_network
+
+networks:
+  prod_db_network:
+    external: true

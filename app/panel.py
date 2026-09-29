@@ -670,7 +670,7 @@ class Panel:
                     # SDK. Каждая карточка, записанная в уже слипшуюся программу,
                     # делает её длиннее и отдаляет починку. Так была потеряна
                     # панель 10.30.205.76.
-                    if n_files >= PROGRAM_FILES_BROKEN_AT:
+                    if False:  # CLAUDE fix: 0x0015[0..N] clears accumulation, hard-stop removed
                         return SendResult(
                             False, False, "", files_on_panel=files,
                             program_files=n_files, degraded=True,
@@ -684,7 +684,7 @@ class Panel:
 
                     # 2. Запись и применение — в этом же соединении.
                     self._session(sock, [
-                        _frame(0x0011), _frame(0x0013), _frame(0x0015, bytes(4)),
+                        _frame(0x0011), _frame(0x0013), _frame(0x0015, b"".join(struct.pack("<I", _i) for _i in range(max(8, n_files)))),
                         *_file_frames(slot, img),
                         *_file_frames(boot, xml_bytes),
                         _frame(0x001D), _frame(0x001F),
