@@ -23,6 +23,7 @@ ECC = {"L": ERROR_CORRECT_L, "M": ERROR_CORRECT_M, "Q": ERROR_CORRECT_Q, "H": ER
 MIN_BOX = 4                      # минимум пикселей на модуль QR для съёмки с улицы
 MIN_TEXT_STRIP = 12              # абсолютный минимум полосы: ниже не влезает и одна строка
 COMFORT_TEXT_STRIP = 24          # ниже этого в полосе помещается только одна строка
+MIN_TEXT_PX = 12                 # кегль текстовой карточки, ниже которого с улицы не прочитать
 
 C_PLATE = (255, 220, 0)          # номер — жёлтый
 C_TIME = (255, 255, 255)         # время — белый
@@ -255,7 +256,9 @@ def render_text_card(*, plate: str = "", dur: str = "", amount: str = "",
     (по ширине и высоте), цвета - те же, что в полосе обычной карточки.
     Пусто - кадр простоя, а не чёрный экран (см. render_idle).
     """
-    rows = [(t.strip(), c) for t, c in ((plate, C_PLATE), (dur, C_DUR), (amount, C_AMOUNT))
+    # Переносы внутри поля - в пробел: строка карточки одна, а PIL не меряет
+    # многострочный текст (ревью Codex, круг 2).
+    rows = [(" ".join(t.split()), c) for t, c in ((plate, C_PLATE), (dur, C_DUR), (amount, C_AMOUNT))
             if t and t.strip()]
     if not rows:
         png, info = render_idle(width=width, height=height)
@@ -271,9 +274,9 @@ def render_text_card(*, plate: str = "", dur: str = "", amount: str = "",
         f = _fit_font(d, text, width - 2 * pad, lh)
         sizes.append(getattr(f, "size", 0))
         tw = d.textlength(text, font=f)
-        if tw > width - 2 * pad:
-            # Не влезло даже минимальным кеглем - края обрезаны. Карточку
-            # показываем, но не выдаём за полноценную (ревью Codex, круг 1).
+        if tw > width - 2 * pad or getattr(f, "size", 0) < MIN_TEXT_PX:
+            # Не влезло или влезло нечитаемым кеглем. Карточку показываем, но
+            # не выдаём за полноценную (ревью Codex, круги 1-2).
             overflow.append(text)
         bbox = f.getbbox(text)
         th = bbox[3] - bbox[1]
@@ -285,7 +288,8 @@ def render_text_card(*, plate: str = "", dur: str = "", amount: str = "",
     info = {"width": width, "height": height, "layout": "text_card",
             "rows": [t for t, _ in rows], "font_px": sizes}
     if overflow:
-        info["warning"] = "текст не влез в ширину панели и обрезан: " + ", ".join(overflow)
+        info["warning"] = (f"текст не влез в ширину панели читаемым кеглем (от {MIN_TEXT_PX} px): "
+                           + ", ".join(overflow))
     return out.getvalue(), info
 
 

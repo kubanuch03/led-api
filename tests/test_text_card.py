@@ -105,3 +105,14 @@ def test_preview_returns_png_for_text_card(body):
     r = TestClient(main.app).post("/preview", json=body)
     assert r.status_code == 200 and r.content.startswith(b"\x89PNG")
     json.loads(r.headers["X-Render-Info"])
+
+
+@pytest.mark.parametrize("field", ["plate", "dur", "amount"])
+def test_newline_inside_field_does_not_break_render(field):
+    png, info = render_card(qr_data="", **{field: "ABC\nDEF"})
+    assert _img(png).size == (160, 160) and "ABC DEF" in info["rows"]
+
+
+def test_unreadable_font_is_flagged():
+    _, info = render_card(qr_data="", plate="W" * 24)
+    assert "читаемым кеглем" in info.get("warning", "")
