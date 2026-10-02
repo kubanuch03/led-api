@@ -90,7 +90,10 @@ def render_card(*, qr_data: str | None = None, qr_image: bytes | None = None,
     почти всегда ложатся неровно, и на улице такой код читается хуже.
     """
     if not qr_data and not qr_image:
-        raise ValueError("нужен либо qr_data (ссылка), либо qr_image (картинка)")
+        # Без QR - текстовая карточка: госномер и сколько простояла машина.
+        # Включается на стороне бэкенда галочкой панели «Показывать QR».
+        return render_text_card(plate=plate, dur=dur, amount=amount,
+                                width=width, height=height)
 
     has_text = bool(plate.strip() or time_.strip() or amount.strip() or dur.strip())
     pos = pos if has_text else "none"
@@ -239,6 +242,44 @@ def render_card(*, qr_data: str | None = None, qr_image: bytes | None = None,
     out = io.BytesIO()
     img.save(out, format="PNG")
     return out.getvalue(), info
+
+
+def render_text_card(*, plate: str = "", dur: str = "", amount: str = "",
+                     width: int = 160, height: int = 160) -> tuple[bytes, dict]:
+    """
+    Карточка БЕЗ QR: госномер крупно сверху, ниже время стоянки, ниже сумма
+    (если передана). Время суток не рисуется - без QR оно только отнимает
+    место у номера.
+
+    Строки делят высоту поровну, кегль подбирается под каждую строку отдельно
+    (по ширине и высоте), цвета - те же, что в полосе обычной карточки.
+    Пусто - кадр простоя, а не чёрный экран (см. render_idle).
+    """
+    rows = [(t.strip(), c) for t, c in ((plate, C_PLATE), (dur, C_DUR), (amount, C_AMOUNT))
+            if t and t.strip()]
+    if not rows:
+        png, info = render_idle(width=width, height=height)
+        info["layout"] = "text_card_empty"
+        return png, info
+
+    img = Image.new("RGB", (width, height), (0, 0, 0))
+    d = ImageDraw.Draw(img)
+    pad = 6
+    lh = (height - 2 * pad) // len(rows)
+    sizes = []
+    for i, (text, color) in enumerate(rows):
+        f = _fit_font(d, text, width - 2 * pad, lh)
+        sizes.append(getattr(f, "size", 0))
+        tw = d.textlength(text, font=f)
+        bbox = f.getbbox(text)
+        th = bbox[3] - bbox[1]
+        d.text(((width - tw) / 2, pad + lh * i + (lh - th) / 2 - bbox[1]),
+               text, font=f, fill=color)
+
+    out = io.BytesIO()
+    img.save(out, format="PNG")
+    return out.getvalue(), {"width": width, "height": height, "layout": "text_card",
+                            "rows": [t for t, _ in rows], "font_px": sizes}
 
 
 #: Цвет кадра простоя. Не белый: панель светит в лицо водителю на выезде, и

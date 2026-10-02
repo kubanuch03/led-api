@@ -56,7 +56,8 @@ def _now_hhmm() -> str:
 
 
 class CardRequest(BaseModel):
-    qr: str = Field(..., description="Ссылка для QR. Короткая: на 160 px влезает ~28 символов")
+    qr: str = Field("", description="Ссылка для QR. Короткая: на 160 px влезает ~28 символов. "
+                                    "Пусто — текстовая карточка без QR: номер и время стоянки")
     plate: str = Field("", description="Госномер")
     amount: str | int | float = Field("", description="Сумма, например '150 KGS'")
     time: str = Field("", description="Время HH:MM; пусто — текущее")
@@ -214,8 +215,6 @@ async def card_form(
     qr_pct: int = Form(100), pos: str = Form("bottom"),
     white: int | None = Form(None), ecc: str | None = Form(None), verify: bool = Form(True),
 ):
-    if not qr and qr_image is None:
-        raise HTTPException(422, "нужен либо qr (ссылка), либо qr_image (файл)")
     blob = await qr_image.read() if qr_image is not None else None
     png, info = await run_in_threadpool(
         render_card,
