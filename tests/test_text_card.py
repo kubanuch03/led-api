@@ -116,3 +116,44 @@ def test_newline_inside_field_does_not_break_render(field):
 def test_unreadable_font_is_flagged():
     _, info = render_card(qr_data="", plate="W" * 24)
     assert "читаемым кеглем" in info.get("warning", "")
+
+
+def _client(monkeypatch, tmp_path, sent):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("LED_LOG_DIR", str(tmp_path))
+    from fastapi.testclient import TestClient
+
+    from app import main
+    from app.panel import SendResult
+
+    def fake_send(png, w, h, verify):
+        sent.append(png)
+        return SendResult(True, True, "m" * 32, files_on_panel=["a"], program_files=1,
+                          degraded=False, detail="показывается")
+
+    monkeypatch.setattr(main.panel, "send_png", fake_send)
+    monkeypatch.setattr(main, "udp_status", lambda host: SimpleNamespace(
+        online=True, device_id="C16L", ip=host, mac="", width=160, height=160,
+        screen_on=True, playing=True, program="p", locked=False, error=None))
+    return TestClient(main.app)
+
+
+@pytest.mark.parametrize("form", [
+    {"plate": "01125ASZ", "dur": "1ч12м"},
+    {"amount": "250 сом"},
+    {},
+    {"plate": "ABC\nDEF"},
+])
+def test_card_form_accepts_no_qr(tmp_path, monkeypatch, form):
+    sent = []
+    r = _client(monkeypatch, tmp_path, sent).post("/card/form", data=form)
+    assert r.status_code == 200 and r.json()["ok"] is True
+    assert _img(sent[0]).size == (160, 160)
+
+
+def test_card_passes_render_warning_to_response(tmp_path, monkeypatch):
+    sent = []
+    r = _client(monkeypatch, tmp_path, sent).post("/card", json={"plate": "W" * 24})
+    assert r.status_code == 200
+    assert "читаемым кеглем" in str(r.json())
