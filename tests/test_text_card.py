@@ -12,7 +12,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from PIL import Image  # noqa: E402
 
-from app.render import C_DUR, C_PLATE, render_card  # noqa: E402
+from app.render import C_AMOUNT, C_DUR, C_PLATE, render_card  # noqa: E402
 
 
 def _img(png):
@@ -149,7 +149,16 @@ def test_card_form_accepts_no_qr(tmp_path, monkeypatch, form):
     sent = []
     r = _client(monkeypatch, tmp_path, sent).post("/card/form", data=form)
     assert r.status_code == 200 and r.json()["ok"] is True
-    assert _img(sent[0]).size == (160, 160)
+    im = _img(sent[0])
+    assert im.size == (160, 160) and len(_colors(im)) > 1, "чёрный кадр"
+    # Карточка ровно та, что рисует рендер для этих полей
+    expected, info = render_card(qr_data="", plate=form.get("plate", ""), dur=form.get("dur", ""),
+                                 amount=form.get("amount", ""))
+    assert sent[0] == expected
+    if form.get("amount"):
+        assert info["rows"] == ["250 сом"] and C_AMOUNT in _colors(im)
+    if not form:
+        assert info["layout"] == "text_card_empty"
 
 
 def test_card_passes_render_warning_to_response(tmp_path, monkeypatch):
