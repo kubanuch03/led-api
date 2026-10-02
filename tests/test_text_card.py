@@ -77,3 +77,31 @@ def test_card_endpoint_accepts_no_qr(tmp_path, monkeypatch):
     r = TestClient(main.app).post("/card", json={"plate": "01125ASZ", "dur": "1ч12м"})
     assert r.status_code == 200 and r.json()["ok"] is True
     assert _img(sent["png"]).size == (160, 160)
+
+
+def test_long_plate_is_flagged_not_silently_cut():
+    _, info = render_card(qr_data="", plate="W" * 100, dur="1ч12м")
+    assert "не влез" in info.get("warning", "")
+    _, ok = render_card(qr_data="", plate="01125ASZ", dur="1ч12м")
+    assert "warning" not in ok
+
+
+import pytest  # noqa: E402
+
+
+@pytest.mark.parametrize("body", [
+    {"plate": "01125ASZ", "dur": "1ч12м"},
+    {"amount": "250 сом"},
+    {},
+])
+def test_preview_returns_png_for_text_card(body):
+    """Ревью Codex, круг 1 🔴: кириллица в диагностике ломала заголовок /preview."""
+    import json
+
+    from fastapi.testclient import TestClient
+
+    from app import main
+
+    r = TestClient(main.app).post("/preview", json=body)
+    assert r.status_code == 200 and r.content.startswith(b"\x89PNG")
+    json.loads(r.headers["X-Render-Info"])

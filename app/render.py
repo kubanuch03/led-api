@@ -266,11 +266,15 @@ def render_text_card(*, plate: str = "", dur: str = "", amount: str = "",
     d = ImageDraw.Draw(img)
     pad = 6
     lh = (height - 2 * pad) // len(rows)
-    sizes = []
+    sizes, overflow = [], []
     for i, (text, color) in enumerate(rows):
         f = _fit_font(d, text, width - 2 * pad, lh)
         sizes.append(getattr(f, "size", 0))
         tw = d.textlength(text, font=f)
+        if tw > width - 2 * pad:
+            # Не влезло даже минимальным кеглем - края обрезаны. Карточку
+            # показываем, но не выдаём за полноценную (ревью Codex, круг 1).
+            overflow.append(text)
         bbox = f.getbbox(text)
         th = bbox[3] - bbox[1]
         d.text(((width - tw) / 2, pad + lh * i + (lh - th) / 2 - bbox[1]),
@@ -278,8 +282,11 @@ def render_text_card(*, plate: str = "", dur: str = "", amount: str = "",
 
     out = io.BytesIO()
     img.save(out, format="PNG")
-    return out.getvalue(), {"width": width, "height": height, "layout": "text_card",
-                            "rows": [t for t, _ in rows], "font_px": sizes}
+    info = {"width": width, "height": height, "layout": "text_card",
+            "rows": [t for t, _ in rows], "font_px": sizes}
+    if overflow:
+        info["warning"] = "текст не влез в ширину панели и обрезан: " + ", ".join(overflow)
+    return out.getvalue(), info
 
 
 #: Цвет кадра простоя. Не белый: панель светит в лицо водителю на выезде, и

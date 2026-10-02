@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import datetime as dt
+import json
 import time
 from typing import Literal
 
@@ -247,7 +248,9 @@ async def preview(req: CardRequest, scale: int = Query(1, ge=1, le=8,
         im = Image.open(io.BytesIO(png))
         im = im.resize((im.width * scale, im.height * scale), Image.NEAREST)
         buf = io.BytesIO(); im.save(buf, format="PNG"); png = buf.getvalue()
-    headers = {"X-Render-Info": str(info)}
+    # JSON с \uXXXX: заголовок HTTP - latin-1, а в диагностике текстовой
+    # карточки кириллица (ревью Codex, круг 1 🔴).
+    headers = {"X-Render-Info": json.dumps(info, ensure_ascii=True, default=str)}
     return Response(png, media_type="image/png", headers=headers)
 
 
